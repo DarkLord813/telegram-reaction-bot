@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: telegram-reaction-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python reaction_bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: YOUR_BOT_TOKEN_HERE
