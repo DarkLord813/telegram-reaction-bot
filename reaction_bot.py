@@ -1,7 +1,7 @@
 import logging
 from telegram import Update, Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.constants import ReactionEmoji, ChatType
+from telegram.constants import ChatType
 import sqlite3
 import asyncio
 from datetime import datetime, timedelta
@@ -37,6 +37,30 @@ REQUIRED_CHANNELS = [
 PREMIUM_REACTIONS_PER_POST = 3000  # 3K reactions per post
 REGULAR_REACTIONS_PER_POST = 30    # 30 reactions per post
 TIME_WINDOW_MINUTES = 5            # 5 minutes window
+
+# Define reaction emojis manually for compatibility
+REACTION_EMOJIS = [
+    "👍",  # Thumbs up
+    "❤️",  # Red heart
+    "🔥",  # Fire
+    "🎉",  # Party popper
+    "⭐",  # Star
+    "👏",  # Clapping hands
+    "😍",  # Heart eyes
+    "🚀",  # Rocket
+    "💫",  # Dizzy
+    "🤩",  # Star struck
+    "✨",  # Sparkles
+    "💥",  # Collision
+    "🙌",  # Raising hands
+    "😊",  # Smiling face with smiling eyes
+    "😂",  # Face with tears of joy
+    "🥰",  # Smiling face with hearts
+    "😎",  # Smiling face with sunglasses
+    "🤗",  # Hugging face
+    "👌",  # OK hand
+    "💯",  # Hundred points
+]
 
 # Health check and monitoring
 class HealthMonitor:
@@ -77,13 +101,20 @@ class Database:
         self.db_path = os.environ.get("DATABASE_URL", "bot_data.db")
         if self.db_path.startswith("postgres://"):
             # For PostgreSQL (Render)
-            import psycopg2
-            self.conn = psycopg2.connect(self.db_path, sslmode='require')
-            self.is_postgres = True
+            try:
+                import psycopg2
+                self.conn = psycopg2.connect(self.db_path, sslmode='require')
+                self.is_postgres = True
+                logger.info("✅ Connected to PostgreSQL database")
+            except ImportError:
+                logger.warning("⚠️ PostgreSQL not available, falling back to SQLite")
+                self.conn = sqlite3.connect("bot_data.db", check_same_thread=False)
+                self.is_postgres = False
         else:
             # For SQLite (local development)
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self.is_postgres = False
+            logger.info("✅ Connected to SQLite database")
         self.create_tables()
     
     def execute_query(self, query, params=None):
@@ -102,354 +133,427 @@ class Database:
     def create_tables(self):
         if self.is_postgres:
             # PostgreSQL table creation
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    is_premium BOOLEAN DEFAULT FALSE,
-                    premium_until TIMESTAMP,
-                    has_joined_channels BOOLEAN DEFAULT FALSE,
-                    joined_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS channels (
-                    channel_id BIGINT PRIMARY KEY,
-                    channel_username TEXT,
-                    channel_title TEXT,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    added_by BIGINT,
-                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    auto_react BOOLEAN DEFAULT TRUE
-                )
-            ''')
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS permanent_reactions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    target_message_id BIGINT,
-                    target_chat_id BIGINT,
-                    reactions_applied TEXT,
-                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_active BOOLEAN DEFAULT TRUE
-                )
-            ''')
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS channel_posts (
-                    id SERIAL PRIMARY KEY,
-                    channel_id BIGINT,
-                    message_id BIGINT,
-                    post_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    reactions_sent INTEGER DEFAULT 0,
-                    is_processed BOOLEAN DEFAULT FALSE,
-                    permanent_reaction_id INTEGER
-                )
-            ''')
+            try:
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        is_premium BOOLEAN DEFAULT FALSE,
+                        premium_until TIMESTAMP,
+                        has_joined_channels BOOLEAN DEFAULT FALSE,
+                        joined_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS channels (
+                        channel_id BIGINT PRIMARY KEY,
+                        channel_username TEXT,
+                        channel_title TEXT,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        added_by BIGINT,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        auto_react BOOLEAN DEFAULT TRUE
+                    )
+                ''')
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS permanent_reactions (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        target_message_id BIGINT,
+                        target_chat_id BIGINT,
+                        reactions_applied TEXT,
+                        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        is_active BOOLEAN DEFAULT TRUE
+                    )
+                ''')
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS channel_posts (
+                        id SERIAL PRIMARY KEY,
+                        channel_id BIGINT,
+                        message_id BIGINT,
+                        post_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        reactions_sent INTEGER DEFAULT 0,
+                        is_processed BOOLEAN DEFAULT FALSE,
+                        permanent_reaction_id INTEGER
+                    )
+                ''')
+                logger.info("✅ PostgreSQL tables created/verified")
+            except Exception as e:
+                logger.error(f"❌ Error creating PostgreSQL tables: {e}")
         else:
             # SQLite table creation
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    is_premium INTEGER DEFAULT 0,
-                    premium_until TIMESTAMP,
-                    has_joined_channels INTEGER DEFAULT 0,
-                    joined_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS channels (
-                    channel_id INTEGER PRIMARY KEY,
-                    channel_username TEXT,
-                    channel_title TEXT,
-                    is_active INTEGER DEFAULT 1,
-                    added_by INTEGER,
-                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    auto_react INTEGER DEFAULT 1
-                )
-            ''')
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS permanent_reactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    target_message_id INTEGER,
-                    target_chat_id INTEGER,
-                    reactions_applied TEXT,
-                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_active INTEGER DEFAULT 1
-                )
-            ''')
-            self.execute_query('''
-                CREATE TABLE IF NOT EXISTS channel_posts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel_id INTEGER,
-                    message_id INTEGER,
-                    post_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    reactions_sent INTEGER DEFAULT 0,
-                    is_processed INTEGER DEFAULT 0,
-                    permanent_reaction_id INTEGER
-                )
-            ''')
+            try:
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id INTEGER PRIMARY KEY,
+                        is_premium INTEGER DEFAULT 0,
+                        premium_until TIMESTAMP,
+                        has_joined_channels INTEGER DEFAULT 0,
+                        joined_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS channels (
+                        channel_id INTEGER PRIMARY KEY,
+                        channel_username TEXT,
+                        channel_title TEXT,
+                        is_active INTEGER DEFAULT 1,
+                        added_by INTEGER,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        auto_react INTEGER DEFAULT 1
+                    )
+                ''')
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS permanent_reactions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        target_message_id INTEGER,
+                        target_chat_id INTEGER,
+                        reactions_applied TEXT,
+                        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        is_active INTEGER DEFAULT 1
+                    )
+                ''')
+                self.execute_query('''
+                    CREATE TABLE IF NOT EXISTS channel_posts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        channel_id INTEGER,
+                        message_id INTEGER,
+                        post_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        reactions_sent INTEGER DEFAULT 0,
+                        is_processed INTEGER DEFAULT 0,
+                        permanent_reaction_id INTEGER
+                    )
+                ''')
+                logger.info("✅ SQLite tables created/verified")
+            except Exception as e:
+                logger.error(f"❌ Error creating SQLite tables: {e}")
     
     def get_user(self, user_id):
-        cursor = self.execute_query('''
-            SELECT user_id, is_premium, premium_until, has_joined_channels, joined_at
-            FROM users WHERE user_id = ?
-        ''', (user_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            if self.is_postgres:
-                return {
-                    'user_id': result[0],
-                    'is_premium': result[1],
-                    'premium_until': result[2],
-                    'has_joined_channels': result[3],
-                    'joined_at': result[4]
-                }
-            else:
-                return {
-                    'user_id': result[0],
-                    'is_premium': bool(result[1]),
-                    'premium_until': result[2],
-                    'has_joined_channels': bool(result[3]),
-                    'joined_at': result[4]
-                }
-        return None
+        try:
+            cursor = self.execute_query('''
+                SELECT user_id, is_premium, premium_until, has_joined_channels, joined_at
+                FROM users WHERE user_id = %s
+            ''' if self.is_postgres else '''
+                SELECT user_id, is_premium, premium_until, has_joined_channels, joined_at
+                FROM users WHERE user_id = ?
+            ''', (user_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                if self.is_postgres:
+                    return {
+                        'user_id': result[0],
+                        'is_premium': result[1],
+                        'premium_until': result[2],
+                        'has_joined_channels': result[3],
+                        'joined_at': result[4]
+                    }
+                else:
+                    return {
+                        'user_id': result[0],
+                        'is_premium': bool(result[1]),
+                        'premium_until': result[2],
+                        'has_joined_channels': bool(result[3]),
+                        'joined_at': result[4]
+                    }
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user {user_id}: {e}")
+            return None
     
     def create_user(self, user_id):
-        if self.is_postgres:
-            self.execute_query('''
-                INSERT INTO users (user_id) 
-                VALUES (%s)
-                ON CONFLICT (user_id) DO NOTHING
-            ''', (user_id,))
-        else:
-            self.execute_query('''
-                INSERT OR IGNORE INTO users (user_id) 
-                VALUES (?)
-            ''', (user_id,))
+        try:
+            if self.is_postgres:
+                self.execute_query('''
+                    INSERT INTO users (user_id) 
+                    VALUES (%s)
+                    ON CONFLICT (user_id) DO NOTHING
+                ''', (user_id,))
+            else:
+                self.execute_query('''
+                    INSERT OR IGNORE INTO users (user_id) 
+                    VALUES (?)
+                ''', (user_id,))
+        except Exception as e:
+            logger.error(f"Error creating user {user_id}: {e}")
     
     def set_user_joined_channels(self, user_id):
-        if self.is_postgres:
-            self.execute_query('''
-                UPDATE users SET has_joined_channels = TRUE, joined_at = CURRENT_TIMESTAMP
-                WHERE user_id = %s
-            ''', (user_id,))
-        else:
-            self.execute_query('''
-                UPDATE users SET has_joined_channels = 1, joined_at = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-            ''', (user_id,))
+        try:
+            if self.is_postgres:
+                self.execute_query('''
+                    UPDATE users SET has_joined_channels = TRUE, joined_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                ''', (user_id,))
+            else:
+                self.execute_query('''
+                    UPDATE users SET has_joined_channels = 1, joined_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                ''', (user_id,))
+        except Exception as e:
+            logger.error(f"Error setting user joined channels {user_id}: {e}")
     
     def set_premium(self, user_id, duration_days=30):
-        premium_until = datetime.now() + timedelta(days=duration_days)
-        if self.is_postgres:
-            self.execute_query('''
-                INSERT INTO users (user_id, is_premium, premium_until) 
-                VALUES (%s, TRUE, %s)
-                ON CONFLICT (user_id) DO UPDATE SET 
-                is_premium = TRUE, premium_until = EXCLUDED.premium_until
-            ''', (user_id, premium_until.isoformat()))
-        else:
-            self.execute_query('''
-                INSERT OR REPLACE INTO users (user_id, is_premium, premium_until) 
-                VALUES (?, 1, ?)
-            ''', (user_id, premium_until.isoformat()))
+        try:
+            premium_until = datetime.now() + timedelta(days=duration_days)
+            if self.is_postgres:
+                self.execute_query('''
+                    INSERT INTO users (user_id, is_premium, premium_until) 
+                    VALUES (%s, TRUE, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET 
+                    is_premium = TRUE, premium_until = EXCLUDED.premium_until
+                ''', (user_id, premium_until.isoformat()))
+            else:
+                self.execute_query('''
+                    INSERT OR REPLACE INTO users (user_id, is_premium, premium_until) 
+                    VALUES (?, 1, ?)
+                ''', (user_id, premium_until.isoformat()))
+        except Exception as e:
+            logger.error(f"Error setting premium for user {user_id}: {e}")
     
     def add_channel(self, channel_id, channel_username, channel_title, added_by):
-        if self.is_postgres:
-            self.execute_query('''
-                INSERT INTO channels (channel_id, channel_username, channel_title, added_by, added_at)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (channel_id) DO UPDATE SET 
-                channel_username = EXCLUDED.channel_username,
-                channel_title = EXCLUDED.channel_title,
-                added_by = EXCLUDED.added_by,
-                added_at = EXCLUDED.added_at
-            ''', (channel_id, channel_username, channel_title, added_by, datetime.now().isoformat()))
-        else:
-            self.execute_query('''
-                INSERT OR REPLACE INTO channels (channel_id, channel_username, channel_title, added_by, added_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (channel_id, channel_username, channel_title, added_by, datetime.now().isoformat()))
+        try:
+            if self.is_postgres:
+                self.execute_query('''
+                    INSERT INTO channels (channel_id, channel_username, channel_title, added_by, added_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (channel_id) DO UPDATE SET 
+                    channel_username = EXCLUDED.channel_username,
+                    channel_title = EXCLUDED.channel_title,
+                    added_by = EXCLUDED.added_by,
+                    added_at = EXCLUDED.added_at
+                ''', (channel_id, channel_username, channel_title, added_by, datetime.now().isoformat()))
+            else:
+                self.execute_query('''
+                    INSERT OR REPLACE INTO channels (channel_id, channel_username, channel_title, added_by, added_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (channel_id, channel_username, channel_title, added_by, datetime.now().isoformat()))
+        except Exception as e:
+            logger.error(f"Error adding channel {channel_id}: {e}")
     
     def get_channels(self):
-        cursor = self.execute_query('''
-            SELECT channel_id, channel_username, channel_title, is_active, auto_react 
-            FROM channels 
-            WHERE is_active = TRUE
-        ''')
-        if self.is_postgres:
-            return [{
-                'channel_id': row[0],
-                'channel_username': row[1],
-                'channel_title': row[2],
-                'is_active': row[3],
-                'auto_react': row[4]
-            } for row in cursor.fetchall()]
-        else:
-            return [{
-                'channel_id': row[0],
-                'channel_username': row[1],
-                'channel_title': row[2],
-                'is_active': bool(row[3]),
-                'auto_react': bool(row[4])
-            } for row in cursor.fetchall()]
+        try:
+            cursor = self.execute_query('''
+                SELECT channel_id, channel_username, channel_title, is_active, auto_react 
+                FROM channels 
+                WHERE is_active = TRUE
+            ''' if self.is_postgres else '''
+                SELECT channel_id, channel_username, channel_title, is_active, auto_react 
+                FROM channels 
+                WHERE is_active = 1
+            ''')
+            if self.is_postgres:
+                return [{
+                    'channel_id': row[0],
+                    'channel_username': row[1],
+                    'channel_title': row[2],
+                    'is_active': row[3],
+                    'auto_react': row[4]
+                } for row in cursor.fetchall()]
+            else:
+                return [{
+                    'channel_id': row[0],
+                    'channel_username': row[1],
+                    'channel_title': row[2],
+                    'is_active': bool(row[3]),
+                    'auto_react': bool(row[4])
+                } for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting channels: {e}")
+            return []
     
     def toggle_channel_auto_react(self, channel_id):
-        if self.is_postgres:
-            self.execute_query('''
-                UPDATE channels SET auto_react = NOT auto_react 
-                WHERE channel_id = %s
-            ''', (channel_id,))
-        else:
-            self.execute_query('''
-                UPDATE channels SET auto_react = NOT auto_react 
-                WHERE channel_id = ?
-            ''', (channel_id,))
+        try:
+            if self.is_postgres:
+                self.execute_query('''
+                    UPDATE channels SET auto_react = NOT auto_react 
+                    WHERE channel_id = %s
+                ''', (channel_id,))
+            else:
+                self.execute_query('''
+                    UPDATE channels SET auto_react = NOT auto_react 
+                    WHERE channel_id = ?
+                ''', (channel_id,))
+        except Exception as e:
+            logger.error(f"Error toggling auto react for channel {channel_id}: {e}")
     
     def log_permanent_reaction(self, user_id, target_message_id, target_chat_id, reactions):
         """Log permanent reactions that should never be removed"""
-        reactions_json = json.dumps(reactions)
-        if self.is_postgres:
-            cursor = self.execute_query('''
-                INSERT INTO permanent_reactions 
-                (user_id, target_message_id, target_chat_id, reactions_applied)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id
-            ''', (user_id, target_message_id, target_chat_id, reactions_json))
-            return cursor.fetchone()[0]
-        else:
-            cursor = self.execute_query('''
-                INSERT INTO permanent_reactions 
-                (user_id, target_message_id, target_chat_id, reactions_applied)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, target_message_id, target_chat_id, reactions_json))
-            return cursor.lastrowid
+        try:
+            reactions_json = json.dumps(reactions)
+            if self.is_postgres:
+                cursor = self.execute_query('''
+                    INSERT INTO permanent_reactions 
+                    (user_id, target_message_id, target_chat_id, reactions_applied)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                ''', (user_id, target_message_id, target_chat_id, reactions_json))
+                return cursor.fetchone()[0]
+            else:
+                cursor = self.execute_query('''
+                    INSERT INTO permanent_reactions 
+                    (user_id, target_message_id, target_chat_id, reactions_applied)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, target_message_id, target_chat_id, reactions_json))
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Error logging permanent reaction: {e}")
+            return None
     
     def log_channel_post(self, channel_id, message_id):
-        if self.is_postgres:
-            cursor = self.execute_query('''
-                INSERT INTO channel_posts (channel_id, message_id)
-                VALUES (%s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING id
-            ''', (channel_id, message_id))
-            result = cursor.fetchone()
-            return result[0] if result else None
-        else:
-            cursor = self.execute_query('''
-                INSERT OR IGNORE INTO channel_posts (channel_id, message_id)
-                VALUES (?, ?)
-            ''', (channel_id, message_id))
-            return cursor.lastrowid
+        try:
+            if self.is_postgres:
+                cursor = self.execute_query('''
+                    INSERT INTO channel_posts (channel_id, message_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                ''', (channel_id, message_id))
+                result = cursor.fetchone()
+                return result[0] if result else None
+            else:
+                cursor = self.execute_query('''
+                    INSERT OR IGNORE INTO channel_posts (channel_id, message_id)
+                    VALUES (?, ?)
+                ''', (channel_id, message_id))
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Error logging channel post: {e}")
+            return None
     
     def mark_post_processed(self, post_id, reactions_sent, permanent_reaction_id=None):
-        if self.is_postgres:
-            self.execute_query('''
-                UPDATE channel_posts 
-                SET is_processed = TRUE, reactions_sent = %s, permanent_reaction_id = %s
-                WHERE id = %s
-            ''', (reactions_sent, permanent_reaction_id, post_id))
-        else:
-            self.execute_query('''
-                UPDATE channel_posts 
-                SET is_processed = 1, reactions_sent = ?, permanent_reaction_id = ?
-                WHERE id = ?
-            ''', (reactions_sent, permanent_reaction_id, post_id))
+        try:
+            if self.is_postgres:
+                self.execute_query('''
+                    UPDATE channel_posts 
+                    SET is_processed = TRUE, reactions_sent = %s, permanent_reaction_id = %s
+                    WHERE id = %s
+                ''', (reactions_sent, permanent_reaction_id, post_id))
+            else:
+                self.execute_query('''
+                    UPDATE channel_posts 
+                    SET is_processed = 1, reactions_sent = ?, permanent_reaction_id = ?
+                    WHERE id = ?
+                ''', (reactions_sent, permanent_reaction_id, post_id))
+        except Exception as e:
+            logger.error(f"Error marking post processed {post_id}: {e}")
     
     def get_pending_posts(self):
-        cursor = self.execute_query('''
-            SELECT cp.id, cp.channel_id, cp.message_id, c.channel_title
-            FROM channel_posts cp
-            JOIN channels c ON cp.channel_id = c.channel_id
-            WHERE cp.is_processed = FALSE AND c.auto_react = TRUE
-            ORDER BY cp.post_time ASC
-        ''')
-        return [{
-            'id': row[0],
-            'channel_id': row[1],
-            'message_id': row[2],
-            'channel_title': row[3]
-        } for row in cursor.fetchall()]
+        try:
+            cursor = self.execute_query('''
+                SELECT cp.id, cp.channel_id, cp.message_id, c.channel_title
+                FROM channel_posts cp
+                JOIN channels c ON cp.channel_id = c.channel_id
+                WHERE cp.is_processed = FALSE AND c.auto_react = TRUE
+                ORDER BY cp.post_time ASC
+            ''' if self.is_postgres else '''
+                SELECT cp.id, cp.channel_id, cp.message_id, c.channel_title
+                FROM channel_posts cp
+                JOIN channels c ON cp.channel_id = c.channel_id
+                WHERE cp.is_processed = 0 AND c.auto_react = 1
+                ORDER BY cp.post_time ASC
+            ''')
+            return [{
+                'id': row[0],
+                'channel_id': row[1],
+                'message_id': row[2],
+                'channel_title': row[3]
+            } for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting pending posts: {e}")
+            return []
     
     def get_post_reaction_stats(self, user_id, target_message_id, target_chat_id):
         """Get reaction statistics for a specific post within the 5-minute window"""
-        # Calculate time window
-        window_start = datetime.now() - timedelta(minutes=TIME_WINDOW_MINUTES)
-        
-        if self.is_postgres:
-            cursor = self.execute_query('''
-                SELECT COUNT(*) FROM permanent_reactions 
-                WHERE user_id = %s 
-                AND target_message_id = %s
-                AND target_chat_id = %s
-                AND applied_at >= %s
-                AND is_active = TRUE
-            ''', (user_id, target_message_id, target_chat_id, window_start.isoformat()))
-        else:
-            cursor = self.execute_query('''
-                SELECT COUNT(*) FROM permanent_reactions 
-                WHERE user_id = ? 
-                AND target_message_id = ?
-                AND target_chat_id = ?
-                AND applied_at >= ?
-                AND is_active = 1
-            ''', (user_id, target_message_id, target_chat_id, window_start.isoformat()))
-        
-        result = cursor.fetchone()
-        total_reactions = result[0] if result[0] else 0
-        
-        return total_reactions
+        try:
+            # Calculate time window
+            window_start = datetime.now() - timedelta(minutes=TIME_WINDOW_MINUTES)
+            
+            if self.is_postgres:
+                cursor = self.execute_query('''
+                    SELECT COUNT(*) FROM permanent_reactions 
+                    WHERE user_id = %s 
+                    AND target_message_id = %s
+                    AND target_chat_id = %s
+                    AND applied_at >= %s
+                    AND is_active = TRUE
+                ''', (user_id, target_message_id, target_chat_id, window_start.isoformat()))
+            else:
+                cursor = self.execute_query('''
+                    SELECT COUNT(*) FROM permanent_reactions 
+                    WHERE user_id = ? 
+                    AND target_message_id = ?
+                    AND target_chat_id = ?
+                    AND applied_at >= ?
+                    AND is_active = 1
+                ''', (user_id, target_message_id, target_chat_id, window_start.isoformat()))
+            
+            result = cursor.fetchone()
+            total_reactions = result[0] if result[0] else 0
+            
+            return total_reactions
+        except Exception as e:
+            logger.error(f"Error getting post reaction stats: {e}")
+            return 0
     
     def can_send_reactions(self, user_id, target_message_id, target_chat_id, num_reactions):
         """Check if user can send the requested number of reactions to this post"""
-        user = self.get_user(user_id)
-        if not user:
-            return False
-        
-        # Get user's reaction limit
-        if user_id in ADMIN_IDS:
-            max_reactions = PREMIUM_REACTIONS_PER_POST
-        elif user['is_premium']:
-            # Check if premium subscription is still valid
-            if user['premium_until']:
-                premium_until = datetime.fromisoformat(user['premium_until'])
-                if datetime.now() > premium_until:
-                    self.remove_premium(user_id)
-                    max_reactions = REGULAR_REACTIONS_PER_POST
+        try:
+            user = self.get_user(user_id)
+            if not user:
+                return False
+            
+            # Get user's reaction limit
+            if user_id in ADMIN_IDS:
+                max_reactions = PREMIUM_REACTIONS_PER_POST
+            elif user['is_premium']:
+                # Check if premium subscription is still valid
+                if user['premium_until']:
+                    premium_until = datetime.fromisoformat(user['premium_until'])
+                    if datetime.now() > premium_until:
+                        self.remove_premium(user_id)
+                        max_reactions = REGULAR_REACTIONS_PER_POST
+                    else:
+                        max_reactions = PREMIUM_REACTIONS_PER_POST
                 else:
-                    max_reactions = PREMIUM_REACTIONS_PER_POST
+                    max_reactions = REGULAR_REACTIONS_PER_POST
             else:
                 max_reactions = REGULAR_REACTIONS_PER_POST
-        else:
-            max_reactions = REGULAR_REACTIONS_PER_POST
-        
-        # Get current reaction count for this post in the last 5 minutes
-        current_reactions = self.get_post_reaction_stats(user_id, target_message_id, target_chat_id)
-        
-        return current_reactions + num_reactions <= max_reactions
+            
+            # Get current reaction count for this post in the last 5 minutes
+            current_reactions = self.get_post_reaction_stats(user_id, target_message_id, target_chat_id)
+            
+            return current_reactions + num_reactions <= max_reactions
+        except Exception as e:
+            logger.error(f"Error checking if can send reactions: {e}")
+            return False
     
     def remove_premium(self, user_id):
-        if self.is_postgres:
-            self.execute_query('''
-                UPDATE users SET is_premium = FALSE, premium_until = NULL 
-                WHERE user_id = %s
-            ''', (user_id,))
-        else:
-            self.execute_query('''
-                UPDATE users SET is_premium = 0, premium_until = NULL 
-                WHERE user_id = ?
-            ''', (user_id,))
+        try:
+            if self.is_postgres:
+                self.execute_query('''
+                    UPDATE users SET is_premium = FALSE, premium_until = NULL 
+                    WHERE user_id = %s
+                ''', (user_id,))
+            else:
+                self.execute_query('''
+                    UPDATE users SET is_premium = 0, premium_until = NULL 
+                    WHERE user_id = ?
+                ''', (user_id,))
+        except Exception as e:
+            logger.error(f"Error removing premium for user {user_id}: {e}")
     
     def cleanup_old_records(self):
         """Clean up old records but keep permanent reactions"""
-        cutoff_time = datetime.now() - timedelta(days=7)
-        if self.is_postgres:
-            self.execute_query('DELETE FROM channel_posts WHERE post_time < %s', (cutoff_time.isoformat(),))
-        else:
-            self.execute_query('DELETE FROM channel_posts WHERE post_time < ?', (cutoff_time.isoformat(),))
+        try:
+            cutoff_time = datetime.now() - timedelta(days=7)
+            if self.is_postgres:
+                self.execute_query('DELETE FROM channel_posts WHERE post_time < %s', (cutoff_time.isoformat(),))
+            else:
+                self.execute_query('DELETE FROM channel_posts WHERE post_time < ?', (cutoff_time.isoformat(),))
+        except Exception as e:
+            logger.error(f"Error cleaning up old records: {e}")
 
 # Initialize database
 db = Database()
@@ -842,20 +946,285 @@ Use the buttons below for quick access.
         
         await update.message.reply_text(stats_text, parse_mode='Markdown')
     
-    # ... (other methods remain the same as previous implementation, but with health_monitor increments)
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        db.create_user(user_id)
+        
+        # Check channel membership
+        if not await self.require_channel_join(update, context, user_id):
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton("⭐ Get Premium", callback_data="premium_info")],
+            [InlineKeyboardButton("📊 My Stats", callback_data="user_stats")],
+        ]
+        
+        # Add admin panel button for admin users
+        if user_id in ADMIN_IDS:
+            keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")])
+        
+        keyboard.extend([
+            [InlineKeyboardButton("📢 Add to Channel", url="https://t.me/your_bot_username?startchannel=true")],
+            [InlineKeyboardButton("🔍 Verify Channels", callback_data="verify_join")]
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_text = """
+🤖 **Reaction Bot** 🔥 PERMANENT REACTIONS
+
+I send **PERMANENT** positive reactions that never get removed!
+
+**Features:**
+• ⭐ **Premium Users**: Up to 3,000 **PERMANENT** reactions per post
+• 🔹 **Regular Users**: Up to 30 **PERMANENT** reactions per post  
+• 📢 **Channel Support**: Auto-reactions when added to channels
+• 🔥 **Permanent**: Reactions stay forever
+• ⚡ **Fast**: Quick reaction delivery
+
+**How to use:**
+1. Add me to your channel as admin
+2. I'll automatically react to all new posts with PERMANENT reactions
+3. Or use /react command for specific messages
+
+Use the buttons below to get started!
+        """
+        
+        if update.message:
+            await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.callback_query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def verify_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manual verification command"""
+        user_id = update.effective_user.id
+        is_joined = await self.check_user_joined_channels(user_id)
+        
+        if is_joined:
+            db.set_user_joined_channels(user_id)
+            await update.message.reply_text("✅ Verification successful! You can now use all bot features.")
+            await self.start_command(update, context)
+        else:
+            await self.send_channel_requirement_message(update, context)
+    
+    async def premium_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not await self.require_channel_join(update, context, user_id):
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton("💫 Buy Premium", callback_data="buy_premium")],
+            [InlineKeyboardButton("📊 Compare Plans", callback_data="compare_plans")],
+            [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        premium_text = f"""
+⭐ **Premium Subscription** 🔥 PERMANENT REACTIONS
+
+**Benefits:**
+• 🚀 **3,000 PERMANENT reactions** per post (within 5 minutes)
+• 📢 **Channel auto-reactions**
+• ⚡ Priority processing
+• 📈 Increased limits
+• 🔥 **Reactions stay forever**
+
+**Cost:** {PREMIUM_COST} Telegram Stars
+
+**How to get premium:**
+1. Send {PREMIUM_COST} Telegram Stars to this bot
+2. Contact admin with payment proof
+3. Admin will activate your premium
+
+**Current Limits:**
+• Premium: {PREMIUM_REACTIONS_PER_POST:,} **PERMANENT** reactions/post
+• Regular: {REGULAR_REACTIONS_PER_POST} **PERMANENT** reactions/post
+        """
+        
+        if update.message:
+            await update.message.reply_text(premium_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.callback_query.edit_message_text(premium_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def user_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not await self.require_channel_join(update, context, user_id):
+            return
+        
+        user = db.get_user(user_id)
+        
+        if not user:
+            db.create_user(user_id)
+            user = db.get_user(user_id)
+        
+        user_type = "👑 Admin" if user_id in ADMIN_IDS else "⭐ Premium" if user['is_premium'] else "🔹 Regular"
+        limit = PREMIUM_REACTIONS_PER_POST if user_id in ADMIN_IDS or user['is_premium'] else REGULAR_REACTIONS_PER_POST
+        
+        keyboard = [
+            [InlineKeyboardButton("⭐ Upgrade to Premium", callback_data="premium_info")],
+            [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        stats_text = f"""
+📊 **Your Stats** 🔥 PERMANENT REACTIONS
+
+**Account Type:** {user_type}
+**Reaction Limit:** {limit:,} **PERMANENT** reactions per post (5 minutes)
+**Premium Until:** {user['premium_until'] or 'Not subscribed'}
+**Channel Member:** ✅ Verified
+
+**Channels Managed:** {len(db.get_channels())}
+**Reactions Type:** 🔥 Permanent (Never removed)
+
+**Usage:** I automatically react to channel posts with PERMANENT reactions or use /react command
+        """
+        
+        if update.message:
+            await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.callback_query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def admin_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text("❌ This command is for admins only.")
+            return
+        
+        channels = db.get_channels()
+        
+        if not channels:
+            await update.message.reply_text("❌ No channels are currently managed.")
+            return
+        
+        channels_text = "📢 **Managed Channels:**\n\n"
+        keyboard = []
+        
+        for channel in channels:
+            status = "✅" if channel['auto_react'] else "❌"
+            channels_text += f"{status} {channel['channel_title']}\n"
+            channels_text += f"   ID: {channel['channel_id']}\n"
+            channels_text += f"   Username: @{channel['channel_username']}\n"
+            channels_text += f"   Auto-react: {'Enabled' if channel['auto_react'] else 'Disabled'}\n"
+            channels_text += f"   Reactions: 🔥 Permanent\n\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{'✅' if channel['auto_react'] else '❌'} {channel['channel_title'][:20]}",
+                    callback_data=f"toggle_channel_{channel['channel_id']}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(channels_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def admin_add_premium(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text("❌ This command is for admins only.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: /admin_addpremium <user_id> [days]")
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            days = int(context.args[1]) if len(context.args) > 1 else 30
+            
+            db.set_premium(target_user_id, days)
+            await update.message.reply_text(f"✅ Premium added for user {target_user_id} for {days} days.")
+            
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID or days format.")
+    
+    async def react_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        # Check channel membership first
+        if not await self.require_channel_join(update, context, user_id):
+            return
+        
+        db.create_user(user_id)
+        
+        if not context.args:
+            await update.message.reply_text("Usage: /react <number_of_reactions> [message_id]")
+            return
+        
+        try:
+            num_reactions = int(context.args[0])
+            if num_reactions <= 0:
+                await update.message.reply_text("❌ Please provide a positive number of reactions.")
+                return
+            
+            # Determine target message
+            if update.message.reply_to_message:
+                target_message = update.message.reply_to_message
+            elif len(context.args) > 1:
+                # Try to get message by ID
+                try:
+                    message_id = int(context.args[1])
+                    target_message = await update.message.chat.get_message(message_id)
+                except Exception as e:
+                    await update.message.reply_text("❌ Could not find the specified message.")
+                    return
+            else:
+                await update.message.reply_text("❌ Please reply to a message or provide a message ID.")
+                return
+            
+            target_message_id = target_message.message_id
+            target_chat_id = update.effective_chat.id
+            
+            # Check if user can send reactions
+            if not db.can_send_reactions(user_id, target_message_id, target_chat_id, num_reactions):
+                user = db.get_user(user_id)
+                limit = PREMIUM_REACTIONS_PER_POST if user_id in ADMIN_IDS or user['is_premium'] else REGULAR_REACTIONS_PER_POST
+                current = db.get_post_reaction_stats(user_id, target_message_id, target_chat_id)
+                
+                await update.message.reply_text(
+                    f"❌ Reaction limit exceeded!\n"
+                    f"• Your limit: {limit:,} **PERMANENT** reactions per post (5 minutes)\n"
+                    f"• Already used: {current:,} reactions\n"
+                    f"• Requested: {num_reactions:,} more\n"
+                    f"• Available: {max(0, limit - current):,} reactions"
+                )
+                return
+            
+            # Send PERMANENT reactions
+            success_count, reactions_sent = await self.send_permanent_reactions(target_chat_id, target_message_id, num_reactions)
+            
+            if success_count > 0:
+                # Log as permanent reactions
+                db.log_permanent_reaction(user_id, target_message_id, target_chat_id, reactions_sent)
+                
+                keyboard = [
+                    [InlineKeyboardButton("📊 Check Stats", callback_data="user_stats")],
+                    [InlineKeyboardButton("⭐ Upgrade Premium", callback_data="premium_info")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"✅ Successfully sent {success_count:,} **PERMANENT** reactions! 🔥\n"
+                    f"📊 Total reactions to this post: {db.get_post_reaction_stats(user_id, target_message_id, target_chat_id):,}\n"
+                    f"⏰ Limit resets in 5 minutes\n"
+                    f"🔥 These reactions will **NEVER** be removed!",
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_text("❌ Failed to send any reactions.")
+                
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid number.")
+        except Exception as e:
+            logger.error(f"Error in react_command: {e}")
+            await update.message.reply_text("❌ An error occurred while processing your request.")
     
     async def send_permanent_reactions(self, chat_id, message_id, num_reactions):
         """Send multiple PERMANENT reactions to a specific message"""
-        permanent_reactions = [
-            ReactionEmoji.THUMBS_UP,
-            ReactionEmoji.RED_HEART, 
-            ReactionEmoji.FIRE,
-            ReactionEmoji.PARTY_POPPER,
-            ReactionEmoji.STAR,
-            ReactionEmoji.CLAPPING_HANDS,
-            "👍", "❤️", "🔥", "🎉", "⭐", "👏", "😍", "🚀", "💫", "🤩", "✨", "💥"
-        ]
-        
         success_count = 0
         reactions_sent = []
         max_batch_size = 10
@@ -865,7 +1234,7 @@ Use the buttons below for quick access.
             
             try:
                 import random
-                reactions_to_send = random.sample(permanent_reactions, batch_size)
+                reactions_to_send = random.sample(REACTION_EMOJIS, batch_size)
                 
                 await self.bot.set_message_reaction(
                     chat_id=chat_id,
